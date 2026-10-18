@@ -26,6 +26,8 @@ import { MailThread } from './schemas/mail-thread.schema';
 import { MailMessage } from './schemas/mail-message.schema';
 import { EmailSuppression } from './schemas/email-suppression.schema';
 import { MailSendSlot } from './schemas/mail-send-slot.schema';
+import { AiChatThread } from './schemas/ai-chat-thread.schema';
+import { AiChatMessage } from './schemas/ai-chat-message.schema';
 
 type AnyModel = Model<any>;
 
@@ -59,6 +61,8 @@ export class MongoService implements OnModuleInit {
   mailMessage: MongoDelegate;
   emailSuppression: MongoDelegate;
   mailSendSlot: MongoDelegate;
+  aiChatThread: MongoDelegate;
+  aiChatMessage: MongoDelegate;
 
   constructor(
     @InjectModel(User.name) private userModel: AnyModel,
@@ -89,6 +93,8 @@ export class MongoService implements OnModuleInit {
     @InjectModel(EmailSuppression.name)
     private emailSuppressionModel: AnyModel,
     @InjectModel(MailSendSlot.name) private mailSendSlotModel: AnyModel,
+    @InjectModel(AiChatThread.name) private aiChatThreadModel: AnyModel,
+    @InjectModel(AiChatMessage.name) private aiChatMessageModel: AnyModel,
   ) {
     const models = () => ({
       user: this.userModel,
@@ -114,6 +120,8 @@ export class MongoService implements OnModuleInit {
       mailMessage: this.mailMessageModel,
       emailSuppression: this.emailSuppressionModel,
       mailSendSlot: this.mailSendSlotModel,
+      aiChatThread: this.aiChatThreadModel,
+      aiChatMessage: this.aiChatMessageModel,
     });
 
     this.user = new MongoDelegate('user', this.userModel, models);
@@ -210,6 +218,16 @@ export class MongoService implements OnModuleInit {
     this.mailSendSlot = new MongoDelegate(
       'mailSendSlot',
       this.mailSendSlotModel,
+      models,
+    );
+    this.aiChatThread = new MongoDelegate(
+      'aiChatThread',
+      this.aiChatThreadModel,
+      models,
+    );
+    this.aiChatMessage = new MongoDelegate(
+      'aiChatMessage',
+      this.aiChatMessageModel,
       models,
     );
   }

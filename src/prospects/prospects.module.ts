@@ -9,5 +9,6 @@ import { ProspectsService } from './prospects.service';
   imports: [SettingsModule, ContactsModule, SignalsModule],
   controllers: [ProspectsController],
   providers: [ProspectsService],
+  exports: [ProspectsService],
 })
 export class ProspectsModule {}

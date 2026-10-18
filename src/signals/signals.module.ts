@@ -33,6 +33,6 @@ import { SesBounceCollector } from './collectors/ses-bounce.collector';
     JobBoardCollector,
     SesBounceCollector,
   ],
-  exports: [WatchService],
+  exports: [WatchService, SignalsService, PlaybooksService],
 })
 export class SignalsModule {}

@@ -68,6 +68,8 @@ import {
   MailSendSlot,
   MailSendSlotSchema,
 } from './schemas/mail-send-slot.schema';
+import { AiChatThread, AiChatThreadSchema } from './schemas/ai-chat-thread.schema';
+import { AiChatMessage, AiChatMessageSchema } from './schemas/ai-chat-message.schema';
 
 @Global()
 @Module({
@@ -100,6 +102,8 @@ import {
       { name: MailMessage.name, schema: MailMessageSchema },
       { name: EmailSuppression.name, schema: EmailSuppressionSchema },
       { name: MailSendSlot.name, schema: MailSendSlotSchema },
+      { name: AiChatThread.name, schema: AiChatThreadSchema },
+      { name: AiChatMessage.name, schema: AiChatMessageSchema },
     ]),
   ],
   providers: [MongoService],

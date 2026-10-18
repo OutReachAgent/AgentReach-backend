@@ -8,5 +8,6 @@ import { ContactFinderService } from './contact-finder.service';
   imports: [SettingsModule, ContactsModule],
   controllers: [ContactFinderController],
   providers: [ContactFinderService],
+  exports: [ContactFinderService],
 })
 export class ContactFinderModule {}

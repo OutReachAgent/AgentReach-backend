@@ -20,6 +20,7 @@ import { CampaignSchedulerModule } from './scheduler/campaign-scheduler.module';
 import { ProspectsModule } from './prospects/prospects.module';
 import { MailboxModule } from './mailbox/mailbox.module';
 import { ContactFinderModule } from './contact-finder/contact-finder.module';
+import { AiChatModule } from './ai-chat/ai-chat.module';
 
 @Module({
   imports: [
@@ -49,6 +50,7 @@ import { ContactFinderModule } from './contact-finder/contact-finder.module';
     ProspectsModule,
     MailboxModule,
     ContactFinderModule,
+    AiChatModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -25,6 +25,7 @@ import { MailStoreService } from './mail-store.service';
     EmailTrackingConfig,
   ],
   exports: [
+    MailboxService,
     MailAttachmentsService,
     MailIngestService,
     MailQueueService,
