@@ -4,6 +4,7 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   IsArray,
+  IsBoolean,
   IsEmail,
   IsIn,
   IsInt,
@@ -40,6 +41,38 @@ export const HUNTER_DEPARTMENTS = [
   'procurement',
 ] as const;
 
+export class ContactFinderLocationDto {
+  @ApiProperty({ required: false, example: 'US' })
+  @IsString()
+  @MaxLength(2)
+  @IsOptional()
+  country?: string;
+
+  @ApiProperty({ required: false, example: 'CA' })
+  @IsString()
+  @MaxLength(20)
+  @IsOptional()
+  state?: string;
+
+  @ApiProperty({ required: false, example: 'San Francisco' })
+  @IsString()
+  @MaxLength(120)
+  @IsOptional()
+  city?: string;
+
+  @ApiProperty({ required: false, example: 'North America' })
+  @IsString()
+  @MaxLength(40)
+  @IsOptional()
+  continent?: string;
+
+  @ApiProperty({ required: false, example: 'AMER' })
+  @IsString()
+  @MaxLength(10)
+  @IsOptional()
+  businessRegion?: string;
+}
+
 export class ContactFinderSearchDto {
   @ApiProperty({ required: false, example: 'stripe.com' })
   @IsString()
@@ -69,6 +102,37 @@ export class ContactFinderSearchDto {
   @IsIn(HUNTER_DEPARTMENTS, { each: true })
   @IsOptional()
   department?: string[];
+
+  @ApiProperty({
+    required: false,
+    type: ContactFinderLocationDto,
+    description: 'Filter people by country, state, city, continent, or region.',
+  })
+  @ValidateNested()
+  @Type(() => ContactFinderLocationDto)
+  @IsOptional()
+  location?: ContactFinderLocationDto;
+
+  @ApiProperty({
+    required: false,
+    isArray: true,
+    example: ['VP Sales', 'Head of Growth'],
+    description: 'Filter people by job title. Values are matched by Hunter.',
+  })
+  @IsArray()
+  @ArrayMaxSize(25)
+  @IsString({ each: true })
+  @MaxLength(100, { each: true })
+  @IsOptional()
+  jobTitles?: string[];
+
+  @ApiProperty({
+    required: false,
+    description: 'When true, only search the company if it is currently hiring.',
+  })
+  @IsBoolean()
+  @IsOptional()
+  hiring?: boolean;
 
   @ApiProperty({ required: false, default: 10 })
   @IsInt()

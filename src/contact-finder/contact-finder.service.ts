@@ -25,13 +25,27 @@ export class ContactFinderService {
   }
 
   async search(userId: string, dto: ContactFinderSearchDto) {
-    const target = this.target(dto);
     const client = await this.client(userId);
+    const requestedTarget = this.target(dto);
+    const target = await this.hiringTarget(client, requestedTarget, dto);
+    if (!target) {
+      return {
+        domain: requestedTarget.domain || '',
+        company: requestedTarget.company || '',
+        pattern: '',
+        people: [],
+        total: 0,
+        limit: dto.limit ?? 10,
+        offset: dto.offset ?? 0,
+      };
+    }
     const result = await client.domainSearch({
       ...target,
       type: dto.type || 'personal',
       seniority: dto.seniority?.length ? dto.seniority : undefined,
       department: dto.department?.length ? dto.department : undefined,
+      location: this.location(dto.location),
+      jobTitles: dto.jobTitles?.map((title) => title.trim()).filter(Boolean),
       limit: dto.limit ?? 10,
       offset: dto.offset ?? 0,
     });
@@ -129,6 +143,56 @@ export class ContactFinderService {
       throw new BadRequestException('Enter a company domain or name.');
     }
     return { company };
+  }
+
+  private async hiringTarget(
+    client: HunterClient,
+    target: { domain?: string; company?: string },
+    dto: ContactFinderSearchDto,
+  ) {
+    if (dto.hiring === undefined) return target;
+
+    const discovered = await client.discover({
+      ...target,
+      location: this.location(dto.location),
+      hiring: dto.hiring,
+    });
+    const company = discovered.companies[0];
+    if (!company?.domain) return null;
+    return { domain: company.domain };
+  }
+
+  private location(location?: {
+    country?: string;
+    state?: string;
+    city?: string;
+    continent?: string;
+    businessRegion?: string;
+  }) {
+    if (!location) return undefined;
+    const normalized = {
+      country: location.country?.trim().toUpperCase(),
+      state: location.state?.trim(),
+      city: location.city?.trim(),
+      continent: location.continent?.trim(),
+      businessRegion: location.businessRegion?.trim().toUpperCase(),
+    };
+    const hasValue = Object.values(normalized).some(Boolean);
+    if (!hasValue) return undefined;
+    if (normalized.city && !normalized.country) {
+      throw new BadRequestException(
+        'Country is required when filtering by city.',
+      );
+    }
+    if (
+      (normalized.continent || normalized.businessRegion) &&
+      (normalized.country || normalized.state || normalized.city)
+    ) {
+      throw new BadRequestException(
+        'Use a continent or business region, or a country/state/city location.',
+      );
+    }
+    return normalized;
   }
 
   private async markExisting(userId: string, people: HunterPerson[]) {

@@ -34,14 +34,31 @@ export type HunterAccount = {
   credits?: HunterUsage;
 };
 
+export type HunterLocation = {
+  country?: string;
+  state?: string;
+  city?: string;
+  continent?: string;
+  businessRegion?: string;
+};
+
 export type HunterDomainSearchParams = {
   domain?: string;
   company?: string;
   type?: string;
   seniority?: string[];
   department?: string[];
+  location?: HunterLocation;
+  jobTitles?: string[];
   limit?: number;
   offset?: number;
+};
+
+export type HunterDiscoverParams = {
+  domain?: string;
+  company?: string;
+  location?: HunterLocation;
+  hiring?: boolean;
 };
 
 export type HunterEmailFinderParams = {
@@ -95,15 +112,29 @@ export class HunterClient {
   }
 
   async domainSearch(params: HunterDomainSearchParams) {
-    const body = await this.request('/domain-search', {
+    const query = {
       domain: params.domain,
       company: params.domain ? undefined : params.company,
       type: params.type,
       seniority: params.seniority?.join(','),
       department: params.department?.join(','),
+      job_titles: params.jobTitles?.join(','),
       limit: params.limit,
       offset: params.offset,
-    });
+    };
+    const body = params.location
+      ? await this.request(
+          '/domain-search',
+          {},
+          {
+            method: 'POST',
+            body: {
+              ...query,
+              location: { include: [this.location(params.location)] },
+            },
+          },
+        )
+      : await this.request('/domain-search', query);
     const data = body?.data || {};
     const domain = text(data.domain);
     const company = text(data.organization);
@@ -133,6 +164,42 @@ export class HunterClient {
       total: Number(body?.meta?.results) || 0,
       limit: Number(body?.meta?.limit) || params.limit || 10,
       offset: Number(body?.meta?.offset) || 0,
+    };
+  }
+
+  async discover(params: HunterDiscoverParams) {
+    const body = await this.request(
+      '/discover',
+      {},
+      {
+        method: 'POST',
+        body: {
+          organization: params.domain
+            ? { domain: [params.domain] }
+            : { name: [params.company] },
+          headquarters_location: params.location
+            ? { include: [this.location(params.location)] }
+            : undefined,
+          job_openings:
+            params.hiring === undefined
+              ? undefined
+              : { hiring: params.hiring },
+          limit: 1,
+          offset: 0,
+        },
+      },
+    );
+    const data: any[] = Array.isArray(body?.data) ? body.data : [];
+    return {
+      companies: data.map((item) => ({
+        domain: text(item?.domain),
+        name: text(item?.organization),
+        country: text(item?.country),
+        state: text(item?.state),
+        city: text(item?.city),
+        headcount: text(item?.headcount),
+      })),
+      total: Number(body?.meta?.results) || 0,
     };
   }
 
@@ -184,6 +251,7 @@ export class HunterClient {
   private async request(
     path: string,
     query: Record<string, string | number | undefined>,
+    options: { method?: 'GET' | 'POST'; body?: unknown } = {},
   ) {
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(query)) {
@@ -196,7 +264,15 @@ export class HunterClient {
     let response: Response;
     try {
       response = await fetch(`${HUNTER_API_URL}${path}${qs ? `?${qs}` : ''}`, {
-        headers: { 'X-API-KEY': this.apiKey, Accept: 'application/json' },
+        method: options.method || (options.body === undefined ? 'GET' : 'POST'),
+        headers: {
+          'X-API-KEY': this.apiKey,
+          Accept: 'application/json',
+          ...(options.body === undefined
+            ? {}
+            : { 'Content-Type': 'application/json' }),
+        },
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
         signal: AbortSignal.timeout(HUNTER_TIMEOUT_MS),
       });
     } catch (err) {
@@ -210,5 +286,15 @@ export class HunterClient {
       throw new BadRequestException(hunterErrorMessage(response.status, body));
     }
     return body;
+  }
+
+  private location(location: HunterLocation) {
+    return {
+      country: location.country?.trim().toUpperCase() || undefined,
+      state: location.state?.trim() || undefined,
+      city: location.city?.trim() || undefined,
+      continent: location.continent?.trim() || undefined,
+      business_region: location.businessRegion?.trim().toUpperCase() || undefined,
+    };
   }
 }
