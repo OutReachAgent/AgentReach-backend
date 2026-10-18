@@ -11,6 +11,7 @@ import {
   encryptSystemSettingsData,
   maskSystemSettings,
 } from './credential-encryption';
+import { HunterClient } from '../contact-finder/hunter.client';
 
 const MAX_VOICE_PREVIEW_TEXT_LENGTH = 300;
 
@@ -24,6 +25,7 @@ const PROVIDER_STATUS_FIELDS: Record<string, string[]> = {
   geminiStatus: ['geminiApiKey'],
   twilioStatus: ['twilioAccountSid', 'twilioAuthToken', 'twilioPhoneNumber'],
   plivoStatus: ['plivoAuthId', 'plivoAuthToken', 'plivoPhoneNumber'],
+  hunterStatus: ['hunterApiKey'],
 };
 
 const CREDENTIAL_LABELS: Record<string, string> = {
@@ -36,6 +38,7 @@ const CREDENTIAL_LABELS: Record<string, string> = {
   plivoAuthId: 'Plivo Auth ID',
   plivoAuthToken: 'Plivo Auth Token',
   plivoPhoneNumber: 'Plivo phone number',
+  hunterApiKey: 'Hunter API key',
 };
 
 /**
@@ -364,6 +367,48 @@ export class SettingsService {
         error: error.message || 'Unknown Gemini API key error',
       };
     }
+  }
+
+  async testHunter(userId: string, payload: { hunterApiKey?: string } = {}) {
+    const apiKey = await this.getHunterApiKey(userId, payload.hunterApiKey);
+    if (!apiKey) {
+      throw new BadRequestException('Hunter API key is missing.');
+    }
+
+    try {
+      const account = await new HunterClient(apiKey).account();
+
+      await this.db.systemSettings.update({
+        where: { id: userId },
+        data: {
+          hunterStatus: 'CONNECTED',
+          hunterLastVerified: new Date(),
+        },
+      });
+
+      return {
+        success: true,
+        message: `Hunter API key verified (${account.planName} plan, ${account.searches.remaining} searches left).`,
+        account,
+      };
+    } catch (error: any) {
+      await this.db.systemSettings.update({
+        where: { id: userId },
+        data: { hunterStatus: 'FAILED' },
+      });
+      return {
+        success: false,
+        error: error.message || 'Unknown Hunter API key error',
+      };
+    }
+  }
+
+  async getHunterApiKey(userId: string, candidate?: string) {
+    const provided = candidate?.trim() || '';
+    if (provided && provided !== MASKED_CREDENTIAL) return provided;
+
+    const settings = await this.getRawSettings(userId);
+    return settings?.hunterApiKey?.trim() || '';
   }
 
   async previewGeminiVoice(

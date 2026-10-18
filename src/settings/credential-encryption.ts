@@ -23,6 +23,7 @@ export const SYSTEM_CREDENTIAL_FIELDS = [
   'plivoAuthId',
   'plivoAuthToken',
   'plivoPhoneNumber',
+  'hunterApiKey',
 ] as const;
 
 type SystemCredentialField = (typeof SYSTEM_CREDENTIAL_FIELDS)[number];

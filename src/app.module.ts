@@ -19,6 +19,7 @@ import { SignalsModule } from './signals/signals.module';
 import { CampaignSchedulerModule } from './scheduler/campaign-scheduler.module';
 import { ProspectsModule } from './prospects/prospects.module';
 import { MailboxModule } from './mailbox/mailbox.module';
+import { ContactFinderModule } from './contact-finder/contact-finder.module';
 
 @Module({
   imports: [
@@ -47,6 +48,7 @@ import { MailboxModule } from './mailbox/mailbox.module';
     CampaignSchedulerModule,
     ProspectsModule,
     MailboxModule,
+    ContactFinderModule,
   ],
   controllers: [AppController],
   providers: [AppService],

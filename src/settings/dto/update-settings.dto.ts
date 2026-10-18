@@ -108,4 +108,9 @@ export class UpdateSettingsDto {
   @IsString()
   @IsOptional()
   plivoPhoneNumber?: string;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  hunterApiKey?: string;
 }

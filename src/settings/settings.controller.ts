@@ -59,6 +59,15 @@ export class SettingsController {
     return this.settingsService.testGemini(request.user.id, body || {});
   }
 
+  @Post('test-hunter')
+  @ApiOperation({ summary: 'Test Hunter.io API key connection' })
+  async testHunter(
+    @Req() request: any,
+    @Body() body?: { hunterApiKey?: string },
+  ) {
+    return this.settingsService.testHunter(request.user.id, body || {});
+  }
+
   @Post('preview-gemini-voice')
   @ApiOperation({ summary: 'Generate a short Google voice preview' })
   async previewGeminiVoice(

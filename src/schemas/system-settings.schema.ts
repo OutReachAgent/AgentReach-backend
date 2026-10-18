@@ -84,6 +84,15 @@ export class SystemSettings {
 
   @Prop()
   plivoLastVerified?: Date;
+
+  @Prop({ default: '' })
+  hunterApiKey: string;
+
+  @Prop({ default: 'DISCONNECTED' })
+  hunterStatus: string;
+
+  @Prop()
+  hunterLastVerified?: Date;
 }
 
 export const SystemSettingsSchema =
