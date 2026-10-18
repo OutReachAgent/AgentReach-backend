@@ -176,6 +176,15 @@ describe('HunterClient', () => {
     await expect(new HunterClient('k').account()).rejects.toThrow(message);
   });
 
+  it('explains when the Hunter plan does not include Discover', async () => {
+    mockFetch(403, {
+      errors: [{ id: 'no_discover_access', details: 'raw' }],
+    });
+    await expect(
+      new HunterClient('k').discover({ company: 'Acme', hiring: true }),
+    ).rejects.toThrow('does not include company hiring search');
+  });
+
   it("passes Hunter's own error details through", async () => {
     mockFetch(400, {
       errors: [{ id: 'pagination_error', details: 'Limited to 10 emails' }],

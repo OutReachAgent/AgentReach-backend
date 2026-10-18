@@ -78,11 +78,15 @@ const usage = (value: any): HunterUsage => ({
 });
 
 export function hunterErrorMessage(status: number, body: any) {
+  const errorId = text(body?.errors?.[0]?.id);
   const details = text(body?.errors?.[0]?.details);
   if (status === 401) {
     return 'Your Hunter API key is invalid. Check it in Settings.';
   }
   if (status === 403) {
+    if (errorId === 'no_discover_access') {
+      return 'Your Hunter plan does not include company hiring search. Turn off the hiring filter or upgrade your Hunter plan.';
+    }
     return 'Hunter is rate limiting requests. Wait a moment and try again.';
   }
   if (status === 429) {
