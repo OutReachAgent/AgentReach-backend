@@ -550,7 +550,8 @@ export class AiChatService {
 
   private confirmationResult(action: Record<string, unknown>, result: unknown) {
     const channel = action.kind === 'launch_email_campaign' ? 'email campaign' : 'calling campaign';
-    return `Launched the ${channel} “${String(action.campaignName || '')}” for ${String(action.contactCount || 0)} contact(s).\n\n```json\n${JSON.stringify(result, null, 2)}\n````;
+    return `Launched the ${channel} “${String(action.campaignName || '')}” for ${String(action.contactCount || 0)} contact(s).\n\n` +
+      '```json\n' + JSON.stringify(result, null, 2) + '\n```';
   }
 
   private async fallbackAnswer(userId: string, content: string, response: Response) {
@@ -564,7 +565,8 @@ export class AiChatService {
     else if (lower.includes('history')) area = 'history';
     if (area) {
       const data = await this.workspaceData(userId, area, '');
-      return `Gemini is not configured, so I can only provide structured workspace data right now. Configure Gemini in Settings for natural-language orchestration.\n\n```json\n${JSON.stringify(data, null, 2).slice(0, 18000)}\n````;
+      return 'Gemini is not configured, so I can only provide structured workspace data right now. Configure Gemini in Settings for natural-language orchestration.\n\n' +
+        '```json\n' + JSON.stringify(data, null, 2).slice(0, 18000) + '\n```';
     }
     this.event(response, 'status', { label: 'Gemini configuration required for this request' });
     return 'Connect a Gemini API key in Settings to use the AI Command Center for research, enrichment, campaign drafting, and multi-step actions.';
