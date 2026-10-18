@@ -101,6 +101,38 @@ const TOOL_DECLARATIONS = [
     },
   },
   {
+    name: 'save_contacts',
+    description:
+      'Save discovered contacts into the current workspace, optionally creating or using a directory. Default duplicate behavior is SKIP.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        people: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              email: { type: 'string' },
+              firstName: { type: 'string' },
+              lastName: { type: 'string' },
+              position: { type: 'string' },
+              company: { type: 'string' },
+              linkedinUrl: { type: 'string' },
+              phoneNumber: { type: 'string' },
+              confidence: { type: 'number' },
+              verificationStatus: { type: 'string' },
+              sourceUrl: { type: 'string' },
+            },
+            required: ['email', 'firstName'],
+          },
+        },
+        directoryName: { type: 'string' },
+        duplicateStrategy: { type: 'string', enum: ['SKIP', 'OVERWRITE'] },
+      },
+      required: ['people'],
+    },
+  },
+  {
     name: 'prepare_email_campaign',
     description:
       'Create an email template and draft campaign with selected contacts. Never launch it. Always return a preview and wait for explicit confirmation.',
@@ -379,6 +411,8 @@ export class AiChatService {
           hiring: args.hiring === true,
           limit: this.clampNumber(args.limit, 10, 1, 100),
         });
+      case 'save_contacts':
+        return this.saveContacts(userId, args);
       case 'prepare_email_campaign':
         return this.prepareEmailCampaign(userId, threadId, args);
       case 'prepare_calling_campaign':
@@ -519,6 +553,45 @@ export class AiChatService {
     };
     await this.db.aiChatThread.update({ where: { id: threadId, ownerId: userId }, data: { pendingAction } });
     return { preview: { campaign, template, contacts, recipientResult }, requiresConfirmation: true, pendingAction };
+  }
+
+  private async saveContacts(userId: string, args: Record<string, unknown>) {
+    const people = Array.isArray(args.people) ? args.people.filter((item) => item && typeof item === 'object') : [];
+    if (!people.length) throw new BadRequestException('Provide at least one discovered contact to save.');
+    const directoryName = this.optionalString(args.directoryName);
+    let directoryId: string | undefined;
+    if (directoryName) {
+      const existing = (await this.contacts.findDirectories(userId) as any[]).find(
+        (directory) => String(directory.name).toLowerCase() === directoryName.toLowerCase(),
+      );
+      directoryId = existing?.id;
+      if (!directoryId) {
+        const directory = await this.contacts.createDirectory({ name: directoryName, description: 'Created by AI Command Center' }, userId);
+        directoryId = directory.id;
+      }
+    }
+    const result = await this.contactFinder.save(userId, {
+      people: people.slice(0, 200).map((item: any) => ({
+        email: String(item.email || '').trim().toLowerCase(),
+        firstName: String(item.firstName || '').trim(),
+        lastName: String(item.lastName || '').trim(),
+        position: this.optionalString(item.position),
+        company: this.optionalString(item.company),
+        linkedinUrl: this.optionalString(item.linkedinUrl),
+        phoneNumber: this.optionalString(item.phoneNumber),
+        confidence: typeof item.confidence === 'number' ? item.confidence : undefined,
+        verificationStatus: this.optionalString(item.verificationStatus),
+        sourceUrl: this.optionalString(item.sourceUrl),
+      })),
+      directoryId,
+      duplicateStrategy: args.duplicateStrategy === 'OVERWRITE' ? 'OVERWRITE' : 'SKIP',
+    } as any);
+    const emails = people.map((item: any) => String(item.email || '').trim().toLowerCase()).filter(Boolean);
+    const saved = await this.db.contact.findMany({
+      where: { ownerId: userId, email: { in: emails } },
+      select: { id: true, firstName: true, lastName: true, email: true, company: true, jobTitle: true, directoryId: true },
+    });
+    return { ...result, directory: directoryId ? { id: directoryId, name: directoryName } : null, contacts: saved };
   }
 
   private async prepareCallingCampaign(userId: string, threadId: string, args: Record<string, unknown>) {
