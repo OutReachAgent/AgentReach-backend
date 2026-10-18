@@ -94,6 +94,54 @@ describe('ContactFinderService', () => {
     ]);
   });
 
+  it('checks the company hiring filter before searching its contacts', async () => {
+    const { service } = makeService();
+    const discover = jest
+      .spyOn(HunterClient.prototype, 'discover')
+      .mockResolvedValue({
+        companies: [{
+          domain: 'acme.com',
+          name: 'Acme',
+          country: 'US',
+          state: '',
+          city: '',
+          headcount: '',
+        }],
+        total: 1,
+      });
+    const domainSearch = jest
+      .spyOn(HunterClient.prototype, 'domainSearch')
+      .mockResolvedValue({
+        domain: 'acme.com',
+        company: 'Acme',
+        pattern: '',
+        people: [],
+        total: 0,
+        limit: 10,
+        offset: 0,
+      });
+
+    await service.search('user-a', {
+      company: 'Acme',
+      hiring: true,
+      location: { country: 'US' },
+      jobTitles: ['VP Sales'],
+    });
+
+    expect(discover).toHaveBeenCalledWith({
+      company: 'Acme',
+      hiring: true,
+      location: expect.objectContaining({ country: 'US' }),
+    });
+    expect(domainSearch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        domain: 'acme.com',
+        location: expect.objectContaining({ country: 'US' }),
+        jobTitles: ['VP Sales'],
+      }),
+    );
+  });
+
   it('saves selected people through the contacts import', async () => {
     const { service, contacts } = makeService();
 

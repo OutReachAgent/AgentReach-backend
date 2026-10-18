@@ -91,6 +91,65 @@ describe('HunterClient', () => {
     ).resolves.toBeNull();
   });
 
+  it('uses Hunter POST filters for location and job-title searches', async () => {
+    const fetchMock = mockFetch(200, {
+      data: { domain: 'acme.com', organization: 'Acme', emails: [] },
+      meta: { results: 0, limit: 10, offset: 0 },
+    });
+
+    await new HunterClient('secret-key').domainSearch({
+      domain: 'acme.com',
+      location: { country: 'us', state: 'CA', city: 'San Francisco' },
+      jobTitles: ['VP Sales', 'Head of Growth'],
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as any;
+    expect(url).toBe('https://api.hunter.io/v2/domain-search');
+    expect(init.method).toBe('POST');
+    expect(init.headers['Content-Type']).toBe('application/json');
+    expect(JSON.parse(init.body)).toMatchObject({
+      domain: 'acme.com',
+      job_titles: 'VP Sales,Head of Growth',
+      location: {
+        include: [
+          { country: 'US', state: 'CA', city: 'San Francisco' },
+        ],
+      },
+    });
+  });
+
+  it('discovers whether the target company is hiring', async () => {
+    const fetchMock = mockFetch(200, {
+      data: [
+        {
+          domain: 'acme.com',
+          organization: 'Acme',
+          country: 'US',
+        },
+      ],
+      meta: { results: 1 },
+    });
+
+    const result = await new HunterClient('secret-key').discover({
+      company: 'Acme',
+      hiring: true,
+      location: { country: 'US' },
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as any;
+    expect(url).toBe('https://api.hunter.io/v2/discover');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toMatchObject({
+      organization: { name: ['Acme'] },
+      headquarters_location: { include: [{ country: 'US' }] },
+      job_openings: { hiring: true },
+    });
+    expect(result.companies[0]).toMatchObject({
+      domain: 'acme.com',
+      name: 'Acme',
+    });
+  });
+
   it('reads remaining searches from the account endpoint', async () => {
     mockFetch(200, {
       data: {
