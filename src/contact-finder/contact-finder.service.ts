@@ -27,6 +27,7 @@ export class ContactFinderService {
   async search(userId: string, dto: ContactFinderSearchDto) {
     const client = await this.client(userId);
     const requestedTarget = this.target(dto);
+    const location = this.location(dto.location);
     const target = await this.hiringTarget(client, requestedTarget, dto);
     if (!target) {
       return {
@@ -44,7 +45,7 @@ export class ContactFinderService {
       type: dto.type || 'personal',
       seniority: dto.seniority?.length ? dto.seniority : undefined,
       department: dto.department?.length ? dto.department : undefined,
-      location: this.location(dto.location),
+      location,
       jobTitles: dto.jobTitles?.map((title) => title.trim()).filter(Boolean),
       limit: dto.limit ?? 10,
       offset: dto.offset ?? 0,
@@ -154,7 +155,6 @@ export class ContactFinderService {
 
     const discovered = await client.discover({
       ...target,
-      location: this.location(dto.location),
       hiring: dto.hiring,
     });
     const company = discovered.companies[0];
@@ -179,9 +179,9 @@ export class ContactFinderService {
     };
     const hasValue = Object.values(normalized).some(Boolean);
     if (!hasValue) return undefined;
-    if (normalized.city && !normalized.country) {
+    if ((normalized.city || normalized.state) && !normalized.country) {
       throw new BadRequestException(
-        'Country is required when filtering by city.',
+        'Country is required when filtering by city or state.',
       );
     }
     if (

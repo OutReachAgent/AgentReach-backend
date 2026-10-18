@@ -133,7 +133,6 @@ describe('HunterClient', () => {
     const result = await new HunterClient('secret-key').discover({
       company: 'Acme',
       hiring: true,
-      location: { country: 'US' },
     });
 
     const [url, init] = fetchMock.mock.calls[0] as any;
@@ -141,7 +140,6 @@ describe('HunterClient', () => {
     expect(init.method).toBe('POST');
     expect(JSON.parse(init.body)).toMatchObject({
       organization: { name: ['Acme'] },
-      headquarters_location: { include: [{ country: 'US' }] },
       job_openings: { hiring: true },
     });
     expect(result.companies[0]).toMatchObject({

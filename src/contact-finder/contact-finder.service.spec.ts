@@ -131,7 +131,6 @@ describe('ContactFinderService', () => {
     expect(discover).toHaveBeenCalledWith({
       company: 'Acme',
       hiring: true,
-      location: expect.objectContaining({ country: 'US' }),
     });
     expect(domainSearch).toHaveBeenCalledWith(
       expect.objectContaining({
