@@ -72,6 +72,22 @@ const TOOL_DECLARATIONS = [
     },
   },
   {
+    name: 'get_signal_insights',
+    description:
+      'Read a focused Signals view for the authenticated workspace. Use this for recent signal activity, signal performance, watched companies, or pending review actions. Never invent signal records or source links.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        type: {
+          type: 'string',
+          description: 'Optional signal type filter, such as hiring, funding, or leadership.',
+        },
+        includeReviewQueue: { type: 'boolean' },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+      },
+    },
+  },
+  {
     name: 'find_hiring_companies',
     description:
       'Use Prospect Finder to discover companies and people matching a hiring-focused description. This can take a while and requires a Gemini key.',
@@ -164,6 +180,20 @@ const TOOL_DECLARATIONS = [
         aiCallingBotId: { type: 'string' },
       },
       required: ['name', 'objective', 'contactIds'],
+    },
+  },
+  {
+    name: 'prepare_signal_action',
+    description:
+      'Prepare an approve or reject action for one pending Signal review match. Always show the Signal, contact, playbook, and preview, then wait for explicit confirmation before executing.',
+    parametersJsonSchema: {
+      type: 'object',
+      properties: {
+        matchId: { type: 'string' },
+        action: { type: 'string', enum: ['approve', 'reject'] },
+        note: { type: 'string' },
+      },
+      required: ['matchId', 'action'],
     },
   },
 ];
@@ -274,6 +304,13 @@ export class AiChatService {
     await this.db.aiChatMessage.create({
       data: { ownerId: userId, threadId: id, role: 'user', content },
     });
+
+    if (thread.title === 'New conversation') {
+      await this.db.aiChatThread.update({
+        where: { id, ownerId: userId },
+        data: { title: this.buildThreadTitle(content) },
+      });
+    }
 
     this.event(response, 'start', { threadId: id, model, reasoningEffort });
 
@@ -401,6 +438,8 @@ export class AiChatService {
     switch (name) {
       case 'get_workspace_data':
         return this.workspaceData(userId, String(args.area || 'dashboard'), String(args.query || ''));
+      case 'get_signal_insights':
+        return this.signalInsights(userId, args);
       case 'find_hiring_companies':
         return this.findHiringCompanies(userId, args, response);
       case 'find_contacts':
@@ -417,6 +456,8 @@ export class AiChatService {
         return this.prepareEmailCampaign(userId, threadId, args);
       case 'prepare_calling_campaign':
         return this.prepareCallingCampaign(userId, threadId, args);
+      case 'prepare_signal_action':
+        return this.prepareSignalAction(userId, threadId, args);
       default:
         throw new BadRequestException(`Unknown assistant tool: ${name}`);
     }
@@ -477,6 +518,28 @@ export class AiChatService {
       default:
         throw new BadRequestException(`Unknown workspace area: ${area}`);
     }
+  }
+
+  private async signalInsights(userId: string, args: Record<string, unknown>) {
+    const type = this.optionalString(args.type);
+    const limit = this.clampNumber(args.limit, 20, 1, 50);
+    const [stats, feed, watches, playbooks] = await Promise.all([
+      this.signals.getStats(userId),
+      this.signals.getFeed(userId, type ? { type } : {}),
+      this.watches.findAll(userId),
+      this.playbooks.findAll(userId),
+    ]);
+    const reviewQueue = args.includeReviewQueue === false
+      ? []
+      : await this.signals.getReviewQueue(userId);
+    return {
+      stats,
+      feed: feed.slice(0, limit),
+      reviewQueue: reviewQueue.slice(0, limit),
+      watches,
+      playbooks,
+      fetchedAt: new Date().toISOString(),
+    };
   }
 
   private async findHiringCompanies(userId: string, args: Record<string, unknown>, response: Response) {
@@ -615,13 +678,51 @@ export class AiChatService {
     return { campaign, requiresConfirmation: true, pendingAction };
   }
 
+  private async prepareSignalAction(userId: string, threadId: string, args: Record<string, unknown>) {
+    const matchId = this.optionalString(args.matchId);
+    const action = args.action === 'reject' ? 'reject' : args.action === 'approve' ? 'approve' : undefined;
+    if (!matchId || !action) {
+      throw new BadRequestException('A Signal match and approve/reject action are required.');
+    }
+
+    const queue = await this.signals.getReviewQueue(userId);
+    const match = (queue as any[]).find((item) => item.matchId === matchId);
+    if (!match) throw new BadRequestException('That Signal review is no longer pending. Refresh the Signals queue and try again.');
+
+    const pendingAction = {
+      id: randomUUID(),
+      kind: 'review_signal_match',
+      matchId,
+      action,
+      note: this.optionalString(args.note),
+      signalTitle: match.signal?.title,
+      companyName: match.signal?.companyName,
+      contactName: match.contact?.name,
+      playbookName: match.playbook?.name,
+    };
+    await this.db.aiChatThread.update({ where: { id: threadId, ownerId: userId }, data: { pendingAction } });
+    return { review: match, requiresConfirmation: true, pendingAction };
+  }
+
   private async executePendingAction(userId: string, action: Record<string, unknown>) {
     if (action.kind === 'launch_email_campaign') return this.emailCampaigns.launchCampaign(String(action.campaignId), userId);
     if (action.kind === 'launch_calling_campaign') return this.callingCampaigns.launchCampaign(String(action.campaignId), userId);
+    if (action.kind === 'review_signal_match') {
+      return this.signals.reviewMatch(String(action.matchId), {
+        action: action.action === 'reject' ? 'reject' : 'approve',
+        note: this.optionalString(action.note),
+      }, userId);
+    }
     throw new BadRequestException('This confirmation has expired.');
   }
 
   private confirmationResult(action: Record<string, unknown>, result: unknown) {
+    if (action.kind === 'review_signal_match') {
+      const outcome = action.action === 'reject' ? 'rejected' : 'approved and launched';
+      return `Signal review ${outcome} for “${String(action.signalTitle || 'Signal')}” at ${String(action.companyName || 'the matched company')} / ${String(action.contactName || 'the matched contact')}.
+
+` + '```json\n' + JSON.stringify(result, null, 2) + '\n```';
+    }
     const channel = action.kind === 'launch_email_campaign' ? 'email campaign' : 'calling campaign';
     return `Launched the ${channel} “${String(action.campaignName || '')}” for ${String(action.contactCount || 0)} contact(s).\n\n` +
       '```json\n' + JSON.stringify(result, null, 2) + '\n```';
@@ -646,7 +747,16 @@ export class AiChatService {
   }
 
   private systemInstruction() {
-    return `You are ReachConvert AI Command Center, an authenticated outreach operations assistant. You can use only the typed tools provided to access the current user's workspace. Never invent data. Use read tools before proposing actions. For email or calling campaigns, prepare drafts but never launch them; the application will request explicit confirmation. Preserve source URLs, confidence, and verification status. Do not reveal private chain-of-thought; give concise progress and final answers. When a tool returns a large result, summarize the important counts and records. The user is in a sales/outreach workspace with Prospect Finder, Contact Finder, Contacts, Email Campaigns, Inbox, AI Calling, Calling Agents, Signals, Scheduler, History, Dashboard, Profile, and Settings.`;
+    return `You are ReachConvert AI Command Center, an authenticated outreach operations assistant. You can use only the typed tools provided to access the current user's workspace. Never invent data. Use read tools before proposing actions. For email, calling, and Signal review actions, prepare a draft or preview but never execute it until the application receives explicit confirmation. Preserve source URLs, confidence, verification status, and Signal timestamps. Do not reveal private chain-of-thought; give concise progress and final answers. When a tool returns a large result, summarize the important counts and records. The user is in a sales/outreach workspace with Prospect Finder, Contact Finder, Contacts, Email Campaigns, Inbox, AI Calling, Calling Agents, Signals, Scheduler, History, Dashboard, Profile, and Settings.`;
+  }
+
+  private buildThreadTitle(content: string) {
+    const normalized = content.replace(/\s+/g, ' ').trim();
+    if (!normalized) return 'New conversation';
+    const withoutQuestion = normalized.replace(/[?!.]+$/, '');
+    return withoutQuestion.length > 52
+      ? `${withoutQuestion.slice(0, 49).trimEnd()}…`
+      : withoutQuestion;
   }
 
   private async saveAssistantMessage(userId: string, threadId: string, content: string) {

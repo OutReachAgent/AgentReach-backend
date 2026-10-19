@@ -37,7 +37,7 @@ function makeService(overrides: Record<string, any> = {}) {
     { listThreads: jest.fn() },
     { listSearches: jest.fn() },
     { getRawSettings: jest.fn().mockResolvedValue({ geminiApiKey: '' }), getSettings: jest.fn() },
-    { getStats: jest.fn(), getFeed: jest.fn(), getReviewQueue: jest.fn() },
+    { getStats: jest.fn(), getFeed: jest.fn(), getReviewQueue: jest.fn(), reviewMatch: jest.fn() },
     { findAll: jest.fn() },
     { findAll: jest.fn(), generateAiTemplate: jest.fn(), create: jest.fn(), findOne: jest.fn() },
   ];
@@ -114,6 +114,38 @@ describe('AiChatService', () => {
 
     expect(dependencies[10].getRawSettings).toHaveBeenCalledWith('owner-1');
     expect(dependencies[1].getDashboardAnalytics).toHaveBeenCalledWith('owner-1');
+    expect(db.aiChatThread.update).toHaveBeenCalledWith({
+      where: { id: 'thread-1', ownerId: 'owner-1' },
+      data: { title: 'Show dashboard performance' },
+    });
     expect(response.write).toHaveBeenCalledWith(expect.stringContaining('structured workspace data'));
+  });
+
+  it('prepares a Signal review action without executing it', async () => {
+    const review = {
+      matchId: 'match-1',
+      signal: { title: 'New hiring activity', companyName: 'Acme' },
+      contact: { name: 'Alex Smith' },
+      playbook: { name: 'Hiring follow-up' },
+    };
+    const { service, db, dependencies } = makeService();
+    dependencies[11].getReviewQueue.mockResolvedValue([review]);
+
+    const result = await (service as any).prepareSignalAction('owner-1', 'thread-1', {
+      matchId: 'match-1',
+      action: 'approve',
+    });
+
+    expect(result.requiresConfirmation).toBe(true);
+    expect(result.pendingAction).toEqual(expect.objectContaining({
+      kind: 'review_signal_match',
+      matchId: 'match-1',
+      action: 'approve',
+      signalTitle: 'New hiring activity',
+    }));
+    expect(db.aiChatThread.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ pendingAction: expect.any(Object) }),
+    }));
+    expect(dependencies[11].reviewMatch).not.toHaveBeenCalled();
   });
 });
