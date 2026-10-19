@@ -104,7 +104,7 @@ describe('AiChatService', () => {
     const analytics = { emailMetrics: { sent: 4 }, callingMetrics: { callsMade: 2 } };
     dependencies[1].getDashboardAnalytics.mockResolvedValue(analytics);
     db.aiChatThread.findUnique
-      .mockResolvedValueOnce({ id: 'thread-1', ownerId: 'owner-1', model: 'gemini-flash-lite-latest', reasoningEffort: 'medium', pendingAction: null })
+      .mockResolvedValueOnce({ id: 'thread-1', ownerId: 'owner-1', title: 'New conversation', model: 'gemini-flash-lite-latest', reasoningEffort: 'medium', pendingAction: null })
       .mockResolvedValueOnce({ id: 'thread-1', ownerId: 'owner-1', pendingAction: null });
     const response = makeResponse();
 
