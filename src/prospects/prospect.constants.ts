@@ -5,7 +5,6 @@ export const DEFAULT_PEOPLE_PER_COMPANY = 2;
 export const MAX_PEOPLE_PER_COMPANY = 20;
 export const DEFAULT_LOOKUP_PEOPLE_PER_COMPANY = 5;
 export const MAX_LOOKUP_COMPANIES = 20;
-export const MAX_SEARCHES_PER_DAY = 10;
 export const QUALIFY_THRESHOLD = 60;
 export const QUALIFY_CONCURRENCY = 3;
 export const RUN_TIME_BUDGET_MS = 50_000;

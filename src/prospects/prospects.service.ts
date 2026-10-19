@@ -22,7 +22,6 @@ import {
   DEFAULT_MAX_COMPANIES,
   DEFAULT_PEOPLE_PER_COMPANY,
   MAX_LOOKUP_COMPANIES,
-  MAX_SEARCHES_PER_DAY,
   RUN_TIME_BUDGET_MS,
   STALE_RUN_MS,
 } from './prospect.constants';
@@ -69,15 +68,6 @@ export class ProspectsService {
   }
 
   async createSearch(userId: string, dto: CreateProspectSearchDto) {
-    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const recent = await this.db.prospectSearch.count({
-      where: { ownerId: userId, createdAt: { gte: since } },
-    });
-    if (recent >= MAX_SEARCHES_PER_DAY) {
-      throw new BadRequestException(
-        `Daily limit reached: ${MAX_SEARCHES_PER_DAY} searches per 24 hours.`,
-      );
-    }
     const base = {
       ownerId: userId,
       status: 'ready',

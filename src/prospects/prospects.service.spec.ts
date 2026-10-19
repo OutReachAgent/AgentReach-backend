@@ -181,7 +181,7 @@ describe('ProspectsService', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it('limits searches per day', async () => {
+  it('allows searches beyond the previous daily limit', async () => {
     const { service, db } = makeService();
     db.prospectSearch.count.mockResolvedValue(10);
     await expect(
@@ -189,7 +189,8 @@ describe('ProspectsService', () => {
         description: 'HR heads at IT companies',
         profile: {},
       }),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    ).resolves.toMatchObject({ id: 's1' });
+    expect(db.prospectSearch.count).not.toHaveBeenCalled();
   });
 
   it('refuses to run two searches at once', async () => {
