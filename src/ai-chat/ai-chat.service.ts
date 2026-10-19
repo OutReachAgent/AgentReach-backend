@@ -104,7 +104,7 @@ const TOOL_DECLARATIONS = [
   {
     name: 'find_contacts',
     description:
-      'Use Contact Finder to discover work contacts for a company. Preserve confidence and verification details.',
+      'Use Contact Finder to discover unique work contacts for a company. Only return contacts that are not already in the current Contacts system. Preserve confidence and verification details.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -119,7 +119,7 @@ const TOOL_DECLARATIONS = [
   {
     name: 'save_contacts',
     description:
-      'Save discovered contacts into the current workspace, optionally creating or using a directory. Default duplicate behavior is SKIP.',
+      'Save only unique discovered contacts that are not already in the current workspace, optionally creating or using a directory. Existing and duplicate emails are always skipped.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -143,7 +143,6 @@ const TOOL_DECLARATIONS = [
           },
         },
         directoryName: { type: 'string' },
-        duplicateStrategy: { type: 'string', enum: ['SKIP', 'OVERWRITE'] },
       },
       required: ['people'],
     },
@@ -443,13 +442,13 @@ export class AiChatService {
       case 'find_hiring_companies':
         return this.findHiringCompanies(userId, args, response);
       case 'find_contacts':
-        return this.contactFinder.search(userId, {
+        return this.uniqueFinderResults(await this.contactFinder.search(userId, {
           domain: this.optionalString(args.domain),
           company: this.optionalString(args.company),
           jobTitles: this.stringArray(args.jobTitles),
           hiring: args.hiring === true,
           limit: this.clampNumber(args.limit, 10, 1, 100),
-        });
+        }));
       case 'save_contacts':
         return this.saveContacts(userId, args);
       case 'prepare_email_campaign':
@@ -558,15 +557,25 @@ export class AiChatService {
     } as any);
     this.event(response, 'status', { label: 'Searching companies and people' });
     const outcome = await this.prospects.run(userId, search.id, new AbortController().signal);
-    const [companies, people] = await Promise.all([
+    const [companies, allPeople] = await Promise.all([
       this.prospects.listCompanies(userId, search.id),
       this.prospects.listPeople(userId, search.id),
     ]);
+    const people = this.uniqueNewPeople(
+      (allPeople as any[]).filter((person) => person.status === 'ready'),
+    );
     return {
       search: outcome,
       profile: profile.profile,
       companies: (companies as any[]).slice(0, 50),
-      people: (people as any[]).slice(0, 100),
+      people: people.slice(0, 100),
+      uniqueOnly: true,
+      excludedExistingContacts: (allPeople as any[]).filter(
+        (person) => person.status === 'duplicate' || person.status === 'added',
+      ).length,
+      excludedWithoutReadyEmail: (allPeople as any[]).filter(
+        (person) => person.status !== 'ready',
+      ).length,
     };
   }
 
@@ -619,8 +628,51 @@ export class AiChatService {
   }
 
   private async saveContacts(userId: string, args: Record<string, unknown>) {
-    const people = Array.isArray(args.people) ? args.people.filter((item) => item && typeof item === 'object') : [];
-    if (!people.length) throw new BadRequestException('Provide at least one discovered contact to save.');
+    const inputPeople = Array.isArray(args.people)
+      ? args.people.filter((item) => item && typeof item === 'object')
+      : [];
+    if (!inputPeople.length) throw new BadRequestException('Provide at least one discovered contact to save.');
+
+    const people = this.uniqueNewPeople(
+      inputPeople.map((item: any) => ({
+        email: String(item.email || '').trim().toLowerCase(),
+        firstName: String(item.firstName || '').trim(),
+        lastName: String(item.lastName || '').trim(),
+        position: this.optionalString(item.position),
+        company: this.optionalString(item.company),
+        linkedinUrl: this.optionalString(item.linkedinUrl),
+        phoneNumber: this.optionalString(item.phoneNumber),
+        confidence: typeof item.confidence === 'number' ? item.confidence : undefined,
+        verificationStatus: this.optionalString(item.verificationStatus),
+        sourceUrl: this.optionalString(item.sourceUrl),
+      })),
+    );
+    if (!people.length) throw new BadRequestException('No new contacts were found to save.');
+
+    const emails = people.map((item: any) => item.email).filter(Boolean);
+    const existingRows = emails.length
+      ? await this.db.contact.findMany({
+          where: { ownerId: userId, email: { in: emails } },
+          select: { email: true },
+        })
+      : [];
+    const existingEmails = new Set(
+      existingRows.map((contact: any) => String(contact.email).trim().toLowerCase()),
+    );
+    const newPeople = people.filter((item: any) => !existingEmails.has(item.email));
+    const existingContactsSkipped = people.length - newPeople.length;
+    if (!newPeople.length) {
+      return {
+        added: 0,
+        updated: 0,
+        skipped: existingContactsSkipped,
+        existingContactsSkipped,
+        uniqueOnly: true,
+        directory: null,
+        contacts: [],
+      };
+    }
+
     const directoryName = this.optionalString(args.directoryName);
     let directoryId: string | undefined;
     if (directoryName) {
@@ -634,27 +686,25 @@ export class AiChatService {
       }
     }
     const result = await this.contactFinder.save(userId, {
-      people: people.slice(0, 200).map((item: any) => ({
-        email: String(item.email || '').trim().toLowerCase(),
-        firstName: String(item.firstName || '').trim(),
-        lastName: String(item.lastName || '').trim(),
-        position: this.optionalString(item.position),
-        company: this.optionalString(item.company),
-        linkedinUrl: this.optionalString(item.linkedinUrl),
-        phoneNumber: this.optionalString(item.phoneNumber),
-        confidence: typeof item.confidence === 'number' ? item.confidence : undefined,
-        verificationStatus: this.optionalString(item.verificationStatus),
-        sourceUrl: this.optionalString(item.sourceUrl),
-      })),
+      people: newPeople.slice(0, 200),
       directoryId,
-      duplicateStrategy: args.duplicateStrategy === 'OVERWRITE' ? 'OVERWRITE' : 'SKIP',
+      duplicateStrategy: 'SKIP',
     } as any);
-    const emails = people.map((item: any) => String(item.email || '').trim().toLowerCase()).filter(Boolean);
     const saved = await this.db.contact.findMany({
-      where: { ownerId: userId, email: { in: emails } },
+      where: { ownerId: userId, email: { in: newPeople.map((item: any) => item.email) } },
       select: { id: true, firstName: true, lastName: true, email: true, company: true, jobTitle: true, directoryId: true },
     });
-    return { ...result, directory: directoryId ? { id: directoryId, name: directoryName } : null, contacts: saved };
+    const newlySaved = saved.filter(
+      (contact: any) => !existingEmails.has(String(contact.email).trim().toLowerCase()),
+    );
+    return {
+      ...result,
+      skipped: Number(result.skipped || 0) + existingContactsSkipped,
+      existingContactsSkipped,
+      uniqueOnly: true,
+      directory: directoryId ? { id: directoryId, name: directoryName } : null,
+      contacts: newlySaved,
+    };
   }
 
   private async prepareCallingCampaign(userId: string, threadId: string, args: Record<string, unknown>) {
@@ -800,6 +850,27 @@ export class AiChatService {
     return Array.isArray(value)
       ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim())
       : [];
+  }
+
+  private uniqueNewPeople(people: any[]) {
+    const seen = new Set<string>();
+    return people.filter((person) => {
+      const email = String(person?.email || '').trim().toLowerCase();
+      if (!email || person?.alreadyInContacts || seen.has(email)) return false;
+      seen.add(email);
+      return true;
+    });
+  }
+
+  private uniqueFinderResults(result: any) {
+    const people = Array.isArray(result?.people) ? result.people : [];
+    const uniquePeople = this.uniqueNewPeople(people);
+    return {
+      ...result,
+      people: uniquePeople,
+      uniqueOnly: true,
+      excludedExistingContacts: people.length - uniquePeople.length,
+    };
   }
 
   private clampNumber(value: unknown, fallback: number, min: number, max: number) {

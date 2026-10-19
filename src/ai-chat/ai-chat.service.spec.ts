@@ -30,7 +30,7 @@ function makeService(overrides: Record<string, any> = {}) {
     { getDashboardAnalytics: jest.fn() },
     { findAll: jest.fn() },
     { launchCampaign: jest.fn().mockResolvedValue({ status: 'RUNNING' }), findAll: jest.fn() },
-    { search: jest.fn() },
+    { search: jest.fn(), save: jest.fn() },
     { findAll: jest.fn() },
     { launchCampaign: jest.fn().mockResolvedValue({ status: 'RUNNING' }), findAll: jest.fn() },
     { getEmailHistory: jest.fn(), getCallHistory: jest.fn() },
@@ -147,5 +147,67 @@ describe('AiChatService', () => {
       data: expect.objectContaining({ pendingAction: expect.any(Object) }),
     }));
     expect(dependencies[11].reviewMatch).not.toHaveBeenCalled();
+  });
+
+  it('returns only unique contacts that are not already saved', async () => {
+    const { service, dependencies } = makeService();
+    dependencies[4].search.mockResolvedValue({
+      domain: 'acme.com',
+      people: [
+        { email: 'known@acme.com', alreadyInContacts: true },
+        { email: 'new@acme.com', alreadyInContacts: false },
+        { email: 'NEW@ACME.COM', alreadyInContacts: false },
+      ],
+      total: 3,
+    });
+
+    const result = await (service as any).executeTool(
+      'owner-1',
+      'thread-1',
+      'find_contacts',
+      { domain: 'acme.com' },
+      makeResponse(),
+    );
+
+    expect(result.people.map((person: any) => person.email)).toEqual([
+      'new@acme.com',
+    ]);
+    expect(result.uniqueOnly).toBe(true);
+    expect(result.excludedExistingContacts).toBe(2);
+  });
+
+  it('forces AI contact saves to skip existing and duplicate emails', async () => {
+    const { service, db, dependencies } = makeService();
+    db.contact.findMany
+      .mockResolvedValueOnce([{ email: 'known@acme.com' }])
+      .mockResolvedValueOnce([{ id: 'contact-new', email: 'new@acme.com' }]);
+    dependencies[4].save.mockResolvedValue({
+      added: 1,
+      updated: 0,
+      skipped: 0,
+      errors: [],
+    });
+
+    const result = await (service as any).saveContacts('owner-1', {
+      people: [
+        { email: 'known@acme.com', firstName: 'Known' },
+        { email: 'new@acme.com', firstName: 'New' },
+        { email: 'NEW@ACME.COM', firstName: 'Duplicate' },
+      ],
+      duplicateStrategy: 'OVERWRITE',
+    });
+
+    expect(dependencies[4].save).toHaveBeenCalledWith(
+      'owner-1',
+      expect.objectContaining({
+        duplicateStrategy: 'SKIP',
+        people: [expect.objectContaining({ email: 'new@acme.com' })],
+      }),
+    );
+    expect(result.added).toBe(1);
+    expect(result.existingContactsSkipped).toBe(1);
+    expect(result.contacts).toEqual([
+      { id: 'contact-new', email: 'new@acme.com' },
+    ]);
   });
 });

@@ -203,11 +203,13 @@ export class ContactFinderService {
       select: { email: true },
     });
     const known = new Set(
-      existing.map((contact: any) => String(contact.email)),
+      existing.map((contact: any) => String(contact.email).trim().toLowerCase()),
     );
     return people.map((person) => ({
       ...person,
-      alreadyInContacts: known.has(person.email),
+      alreadyInContacts: known.has(
+        String(person.email || '').trim().toLowerCase(),
+      ),
     }));
   }
 
