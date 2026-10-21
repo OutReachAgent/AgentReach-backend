@@ -21,6 +21,7 @@ Contributor-facing docs for the full workspace live one level up in [`../docs`](
 - [Contacts and directories](../docs/features/contacts.md)
 - [Prospect Finder](../docs/features/prospect-finder.md)
 - [Contact Finder (Hunter.io)](../docs/features/contact-finder.md)
+- [Scout, the outreach assistant](../docs/features/scout.md)
 - [Email campaigns and templates](../docs/features/email-campaigns-and-templates.md)
 - [AI calling and realtime voice](../docs/features/ai-calling-and-realtime-voice.md)
 - [Signals and playbooks](../docs/features/signals-and-playbooks.md)
@@ -92,6 +93,7 @@ Client (Next.js frontend)
 | **Settings**         | `src/settings`                   | Stores per-install credentials (AWS SES, Twilio, Gemini) **encrypted at rest**. Connection-test endpoints for each provider and a Gemini voice preview. |
 | **Contacts**         | `src/contacts`                   | Contact + contact-directory CRUD, CSV/XLSX/PDF file parsing, and bulk import. |
 | **Prospects**        | `src/prospects`                  | Prospect Finder. Turns an ideal-customer description (or a list of companies) into a resumable search: Gemini suggests companies, `SiteReader` reads their public team/contact pages (robots-aware, throttled), code verifies every name/email/phone against the page text, and a weighted score qualifies companies. Verified people are added to Contacts. |
+| **AiChat (Scout)**   | `src/ai-chat`                    | The Scout assistant: conversation threads, a Gemini tool-calling loop streamed over SSE, workspace read tools, Contact Finder and Prospect Finder tools, and campaign or Signal actions that wait for an explicit confirmation. |
 | **ContactFinder**    | `src/contact-finder`             | Hunter.io lookups with the user's own key: company people search (seniority, department, title, location, hiring filters), single email lookup, email verification, plan usage, and saving results to Contacts. Also used by the AI chat tools. |
 | **Templates**        | `src/templates`                  | Email template CRUD, predefined templates, AI generation (sync + async job), and reference-PDF ingestion for style matching. |
 | **EmailCampaigns**   | `src/email-campaigns`            | Campaign CRUD, add/remove contacts, and launch (sends via SES, tracks per-contact status). |
@@ -209,6 +211,13 @@ Requires a Gemini key in Settings.
 filters), `/find-email`, and `/verify` — these spend Hunter credits; and
 `POST /save` (import selected people into Contacts). Requires a Hunter.io key in
 Settings; `POST /api/settings/test-hunter` verifies it.
+
+### Scout (AI chat) — `/api/ai-chat`
+`GET /models`; threads under `/threads` (list, create, `GET`/`PATCH`/`DELETE /:id`);
+`POST /threads/:id/messages/stream` streams Server-Sent Events (`start`, `status`,
+`tool_start`, `tool_result`, `delta`, `reset`, `done`, `error`). Launches run only
+when the request sends `confirm: true` with the `actionId` of the pending preview.
+Requires a Gemini key; contact searches also need a Hunter.io key.
 
 ### Templates — `/api/templates`
 CRUD on `/`, `/:id`; `GET /predefined`; `POST /generate` (sync AI) and the async job
