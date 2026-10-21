@@ -19,6 +19,8 @@ Contributor-facing docs for the full workspace live one level up in [`../docs`](
 - [Authentication, profile, and appearance](../docs/features/auth-and-profile.md)
 - [Settings and provider integrations](../docs/features/settings-and-integrations.md)
 - [Contacts and directories](../docs/features/contacts.md)
+- [Prospect Finder](../docs/features/prospect-finder.md)
+- [Contact Finder (Hunter.io)](../docs/features/contact-finder.md)
 - [Email campaigns and templates](../docs/features/email-campaigns-and-templates.md)
 - [AI calling and realtime voice](../docs/features/ai-calling-and-realtime-voice.md)
 - [Signals and playbooks](../docs/features/signals-and-playbooks.md)
@@ -39,11 +41,12 @@ the frontend; for engineering details, use `../docs`.
 | Database           | MongoDB via [Mongoose 9](https://mongoosejs.com) (`@nestjs/mongoose`) |
 | Auth               | JWT access + refresh tokens, custom salted-hash passwords     |
 | Email              | AWS SES (`@aws-sdk/client-ses`)                               |
-| LLM (text)         | Google Gemini text models (template/campaign generation, signal classification) |
+| LLM (text)         | Google Gemini text models (template/campaign generation, signal classification, Prospect Finder analysis) |
 | LLM (voice)        | Google Gemini Live (`@google/genai`) — native audio streaming |
 | Telephony          | Twilio (outbound calls, media streams, recordings)           |
 | RAG / embeddings   | Gemini embeddings stored in MongoDB for bot knowledge bases   |
 | File parsing       | `csv-parse`, `pdf-parse` (contact import, resume/reference PDFs) |
+| Contact lookup     | Hunter.io API v2 via `fetch` (Contact Finder), `libphonenumber-js` (Prospect Finder phone parsing) |
 | Scheduling         | `@nestjs/schedule` (signal polling cron)                      |
 | Signal sources     | RSS/news, SEC EDGAR, job boards, SES bounces                 |
 | API docs           | `@nestjs/swagger` + `swagger-ui-express`                     |
@@ -69,6 +72,7 @@ Client (Next.js frontend)
 │                                                            │
 │  Contacts   Templates   EmailCampaigns   CallingCampaigns  │
 │  Bot(RAG)   Signals      History          Analytics        │
+│  Prospects (ICP search)  ContactFinder (Hunter.io)         │
 │  Settings (encrypted per-tenant credentials)               │
 │                                                            │
 │  RealtimeCalling ── WS /twilio/stream ⇄ Gemini Live        │
@@ -77,6 +81,7 @@ Client (Next.js frontend)
         │                         │                    │
         ▼                         ▼                    ▼
     MongoDB                  AWS SES / Gemini       Twilio / Gemini
+                         Hunter.io / company sites
 ```
 
 ### Modules
@@ -86,6 +91,8 @@ Client (Next.js frontend)
 | **Auth**             | `src/auth`                       | Register, login, refresh, logout, profile/password updates, `me`. Issues JWT access + refresh tokens. A global `AuthGuard` protects every route unless marked `@Public()`. |
 | **Settings**         | `src/settings`                   | Stores per-install credentials (AWS SES, Twilio, Gemini) **encrypted at rest**. Connection-test endpoints for each provider and a Gemini voice preview. |
 | **Contacts**         | `src/contacts`                   | Contact + contact-directory CRUD, CSV/XLSX/PDF file parsing, and bulk import. |
+| **Prospects**        | `src/prospects`                  | Prospect Finder. Turns an ideal-customer description (or a list of companies) into a resumable search: Gemini suggests companies, `SiteReader` reads their public team/contact pages (robots-aware, throttled), code verifies every name/email/phone against the page text, and a weighted score qualifies companies. Verified people are added to Contacts. |
+| **ContactFinder**    | `src/contact-finder`             | Hunter.io lookups with the user's own key: company people search (seniority, department, title, location, hiring filters), single email lookup, email verification, plan usage, and saving results to Contacts. Also used by the AI chat tools. |
 | **Templates**        | `src/templates`                  | Email template CRUD, predefined templates, AI generation (sync + async job), and reference-PDF ingestion for style matching. |
 | **EmailCampaigns**   | `src/email-campaigns`            | Campaign CRUD, add/remove contacts, and launch (sends via SES, tracks per-contact status). |
 | **Bot**              | `src/bot`                        | "AI calling bot" personas with a RAG knowledge base. PDF is chunked + embedded (Gemini) and stored for semantic search. Serves the Google voice list. |
@@ -98,10 +105,10 @@ Client (Next.js frontend)
 ### Data model
 
 Mongoose schemas live in [`src/schemas/`](src/schemas/): `user`, `system-settings`,
-`contact`, `contact-directory`, `template`, `email-campaign`,
-`email-campaign-contact`, `calling-campaign`, `call-history`, `ai-calling-bot`,
-`ai-calling-bot-embedding`, `signal`, `signal-match`, `company-watch`, `playbook`,
-and `triggered-outreach`.
+`contact`, `contact-directory`, `prospect-search`, `prospect-company`, `prospect`,
+`template`, `email-campaign`, `email-campaign-contact`, `calling-campaign`,
+`call-history`, `ai-calling-bot`, `ai-calling-bot-embedding`, `signal`,
+`signal-match`, `company-watch`, `playbook`, and `triggered-outreach`.
 
 ---
 
@@ -141,7 +148,7 @@ npm run start:dev         # watch mode on http://localhost:3001
 | `GEMINI_API_KEY`           | optional | Bootstrap fallback. The encrypted key saved in Settings takes precedence. |
 | `GEMINI_LIVE_MODEL`        | optional | Gemini Live model id (e.g. `gemini-2.5-flash-native-audio-preview-12-2025`). |
 
-> Most provider credentials (AWS SES, Twilio, Gemini) are configured at
+> Most provider credentials (AWS SES, Twilio, Gemini, Hunter.io) are configured at
 > runtime through **Settings** in the UI and stored **encrypted** in MongoDB, not in
 > `.env`. If a required credential is missing, the connection-test and provider
 > services return a descriptive error.
@@ -181,12 +188,27 @@ unless noted. Explore the live, always-accurate contract in **Swagger** at `/doc
 
 ### Settings — `/api/settings`
 `GET /` (masked), `PATCH /` (encrypted update), and connection tests:
-`POST /test-ses`, `/test-twilio`, `/test-gemini`,
+`POST /test-ses`, `/test-twilio`, `/test-gemini`, `/test-hunter`,
 `/preview-gemini-voice`.
 
 ### Contacts — `/api/contacts`
 CRUD on `/`, `/:id`; directories under `/directories` (+ `/:id`); `POST /parse-file`
 (upload CSV/XLSX/PDF to preview) and `POST /import` (bulk create).
+
+### Prospect Finder — `/api/prospects`
+`POST /profile` (description → editable profile + cost estimate); `POST /searches`,
+`GET /searches`, `GET /searches/:id`, `DELETE /searches/:id`;
+`GET /searches/:id/companies` and `/people` (`?status=`); `POST /searches/:id/run`
+(works ~50 s per call — call again until `done` is true) and `/cancel`;
+`PATCH /people/:id` (set a work email, dismiss, or restore);
+`POST /people/add-to-contacts`; `POST /companies/:id/watch` (add to Signals).
+Requires a Gemini key in Settings.
+
+### Contact Finder — `/api/contact-finder`
+`GET /account` (Hunter plan and usage); `POST /search` (people at a company with
+filters), `/find-email`, and `/verify` — these spend Hunter credits; and
+`POST /save` (import selected people into Contacts). Requires a Hunter.io key in
+Settings; `POST /api/settings/test-hunter` verifies it.
 
 ### Templates — `/api/templates`
 CRUD on `/`, `/:id`; `GET /predefined`; `POST /generate` (sync AI) and the async job
