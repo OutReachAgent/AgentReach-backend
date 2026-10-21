@@ -52,4 +52,10 @@ export class SendAiChatMessageDto {
   @IsOptional()
   @IsBoolean()
   confirm?: boolean;
+
+  /** The id of the pending action the user saw when confirming. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  actionId?: string;
 }

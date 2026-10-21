@@ -36,11 +36,25 @@ import {
 type ToolCall = { name: string; args?: Record<string, unknown>; id?: string };
 type ChatThread = Record<string, any>;
 
+const ASSISTANT_NAME = 'Scout';
+
 const MAX_TOOL_ROUNDS: Record<ReasoningEffort, number> = {
   low: 2,
   medium: 5,
   high: 8,
 };
+
+// Tools that spend the user's Hunter or Gemini credits, and how many times
+// one answer may call each.
+const CREDIT_TOOL_LIMITS: Record<string, number> = {
+  find_contacts: 3,
+  find_hiring_companies: 1,
+};
+
+const HISTORY_MESSAGES = 40;
+const HEARTBEAT_MS = 15_000;
+
+class AssistantStopped extends Error {}
 
 const TOOL_DECLARATIONS = [
   {
@@ -90,7 +104,7 @@ const TOOL_DECLARATIONS = [
   {
     name: 'find_hiring_companies',
     description:
-      'Use Prospect Finder to discover companies and people matching a hiring-focused description. This can take a while and requires a Gemini key.',
+      'Use Prospect Finder to discover companies and people matching a hiring-focused description. Runs one search pass of about 50 seconds and requires a Gemini key; the user can resume the search in Prospect Finder. Call it at most once per answer.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -104,7 +118,7 @@ const TOOL_DECLARATIONS = [
   {
     name: 'find_contacts',
     description:
-      'Use Contact Finder to discover unique work contacts for a company. Only return contacts that are not already in the current Contacts system. Preserve confidence and verification details.',
+      'Use Contact Finder to discover unique work contacts for a company. Only return contacts that are not already in the current Contacts system. Preserve confidence and verification details. Each call spends one of the user\'s Hunter searches, so do not repeat a search already made in this conversation. Set hiring only when the user asks for companies that are hiring.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
@@ -119,32 +133,14 @@ const TOOL_DECLARATIONS = [
   {
     name: 'save_contacts',
     description:
-      'Save only unique discovered contacts that are not already in the current workspace, optionally creating or using a directory. Existing and duplicate emails are always skipped.',
+      'Save contacts that find_contacts or find_hiring_companies returned earlier in this conversation, optionally creating or using a directory. Pass their email addresses exactly as those tools returned them. Addresses that were not found in this conversation are not saved, and existing contacts are always skipped.',
     parametersJsonSchema: {
       type: 'object',
       properties: {
-        people: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              email: { type: 'string' },
-              firstName: { type: 'string' },
-              lastName: { type: 'string' },
-              position: { type: 'string' },
-              company: { type: 'string' },
-              linkedinUrl: { type: 'string' },
-              phoneNumber: { type: 'string' },
-              confidence: { type: 'number' },
-              verificationStatus: { type: 'string' },
-              sourceUrl: { type: 'string' },
-            },
-            required: ['email', 'firstName'],
-          },
-        },
+        emails: { type: 'array', items: { type: 'string' } },
         directoryName: { type: 'string' },
       },
-      required: ['people'],
+      required: ['emails'],
     },
   },
   {
@@ -257,10 +253,10 @@ export class AiChatService {
     const thread = await this.getOwnedThread(userId, id);
     const messages = await this.db.aiChatMessage.findMany({
       where: { ownerId: userId, threadId: id },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { createdAt: 'desc' },
       take: 200,
     });
-    return { ...this.threadSummary(thread), pendingAction: thread.pendingAction || null, messages };
+    return { ...this.threadSummary(thread), pendingAction: thread.pendingAction || null, messages: messages.reverse() };
   }
 
   async updateThread(userId: string, id: string, dto: UpdateAiChatThreadDto) {
@@ -289,6 +285,7 @@ export class AiChatService {
     id: string,
     dto: SendAiChatMessageDto,
     response: Response,
+    signal?: AbortSignal,
   ) {
     const thread = await this.getOwnedThread(userId, id);
     const content = dto.content.trim();
@@ -312,9 +309,18 @@ export class AiChatService {
     }
 
     this.event(response, 'start', { threadId: id, model, reasoningEffort });
+    // Comment lines keep proxies from closing the stream while a long tool runs.
+    const heartbeat = setInterval(() => {
+      if (!response.writableEnded) response.write(': ping\n\n');
+    }, HEARTBEAT_MS);
 
     try {
       if (dto.confirm && thread.pendingAction) {
+        if (dto.actionId && dto.actionId !== thread.pendingAction.id) {
+          throw new BadRequestException(
+            'This confirmation is out of date. Review the latest preview and confirm again.',
+          );
+        }
         this.event(response, 'status', { label: 'Executing your confirmed action' });
         const result = await this.executePendingAction(userId, thread.pendingAction);
         await this.db.aiChatThread.update({
@@ -333,19 +339,26 @@ export class AiChatService {
           where: { id, ownerId: userId },
           data: { pendingAction: null, status: 'idle' },
         });
-        const answer = 'Cancelled. Nothing was sent or launched.';
+        const discarded = await this.discardDraft(userId, thread.pendingAction);
+        const answer = discarded
+          ? 'Cancelled. Nothing was sent or launched, and the draft was removed.'
+          : 'Cancelled. Nothing was sent or launched.';
         await this.saveAssistantMessage(userId, id, answer);
         this.event(response, 'delta', { text: answer });
         this.event(response, 'done', { pendingAction: null });
         return;
       }
 
-      const answer = await this.runAgent(userId, id, thread, content, model, reasoningEffort, response);
+      const { answer, streamed } = await this.runAgent(userId, id, thread, content, model, reasoningEffort, response, signal);
       await this.saveAssistantMessage(userId, id, answer);
-      this.event(response, 'delta', { text: answer });
+      if (!streamed) this.event(response, 'delta', { text: answer });
       const refreshed = await this.getOwnedThread(userId, id);
       this.event(response, 'done', { pendingAction: refreshed.pendingAction || null });
     } catch (error: any) {
+      if (signal?.aborted) {
+        await this.saveAssistantMessage(userId, id, 'Stopped before finishing.');
+        return;
+      }
       const message = error?.message || 'The assistant could not complete that request.';
       await this.db.aiChatThread.update({
         where: { id, ownerId: userId },
@@ -353,6 +366,7 @@ export class AiChatService {
       });
       this.event(response, 'error', { message });
     } finally {
+      clearInterval(heartbeat);
       if (!response.writableEnded) response.end();
     }
   }
@@ -365,46 +379,64 @@ export class AiChatService {
     model: string,
     reasoningEffort: ReasoningEffort,
     response: Response,
-  ) {
+    signal?: AbortSignal,
+  ): Promise<{ answer: string; streamed: boolean }> {
     const settings = await this.settings.getRawSettings(userId);
     const apiKey = settings?.geminiApiKey?.trim();
-    if (!apiKey) return this.fallbackAnswer(userId, content, response);
+    if (!apiKey) return { answer: await this.fallbackAnswer(userId, content, response), streamed: false };
 
     const history = await this.db.aiChatMessage.findMany({
       where: { ownerId: userId, threadId },
-      orderBy: { createdAt: 'asc' },
-      take: 40,
+      orderBy: { createdAt: 'desc' },
+      take: HISTORY_MESSAGES,
     });
-    const contents: any[] = history
-      .filter((item: any) => item.role === 'user' || item.role === 'assistant')
-      .map((item: any) => ({
-        role: item.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: String(item.content).slice(0, 12000) }],
-      }));
+    const contents = this.historyContents(history.reverse());
     const ai = new GoogleGenAI({ apiKey });
     const toolResults: Array<{ name: string; result: unknown }> = [];
     const maxRounds = MAX_TOOL_ROUNDS[reasoningEffort];
+    const creditCalls: Record<string, number> = {};
 
     for (let round = 0; round < maxRounds; round++) {
-      const generated: any = await ai.models.generateContent({
+      if (signal?.aborted) throw new AssistantStopped();
+      const stream = await ai.models.generateContentStream({
         model: resolveGeminiTextModel(model),
         contents,
         config: {
           maxOutputTokens: reasoningEffort === 'high' ? 5000 : reasoningEffort === 'low' ? 1400 : 2800,
           systemInstruction: this.systemInstruction(),
           tools: [{ functionDeclarations: TOOL_DECLARATIONS }],
+          abortSignal: signal,
         },
       });
-      const calls: ToolCall[] = generated.functionCalls || [];
-      if (!calls.length) {
-        return String(generated.text || '').trim() || this.fallbackAnswer(userId, content, response);
+      let text = '';
+      const modelParts: any[] = [];
+      const calls: ToolCall[] = [];
+      for await (const chunk of stream) {
+        const parts: any[] = chunk.candidates?.[0]?.content?.parts || [];
+        modelParts.push(...parts);
+        for (const part of parts) {
+          if (part.functionCall) calls.push(part.functionCall);
+          if (typeof part.text === 'string' && part.text && !part.thought) {
+            text += part.text;
+            if (!calls.length) this.event(response, 'delta', { text: part.text });
+          }
+        }
       }
+      if (!calls.length) {
+        const answer = text.trim();
+        return answer
+          ? { answer, streamed: true }
+          : { answer: await this.fallbackAnswer(userId, content, response), streamed: false };
+      }
+      // Text written before a tool call is narration, not the answer.
+      if (text) this.event(response, 'reset', {});
 
-      const modelParts = generated.candidates?.[0]?.content?.parts;
-      if (modelParts) contents.push({ role: 'model', parts: modelParts });
+      contents.push({ role: 'model', parts: modelParts });
+      const responses: any[] = [];
       for (const call of calls) {
+        if (signal?.aborted) throw new AssistantStopped();
         this.event(response, 'tool_start', { name: call.name, args: call.args || {} });
-        const result = await this.executeTool(userId, threadId, call.name, call.args || {}, response);
+        const result = await this.runTool(userId, threadId, call, response, signal, creditCalls);
         toolResults.push({ name: call.name, result });
         await this.db.aiChatMessage.create({
           data: {
@@ -417,14 +449,92 @@ export class AiChatService {
           },
         });
         this.event(response, 'tool_result', { name: call.name, result });
-        contents.push({
-          role: 'user',
-          parts: [{ functionResponse: { name: call.name, response: { result } } }],
-        });
+        responses.push({ functionResponse: { id: call.id, name: call.name, response: { result } } });
       }
+      contents.push({ role: 'user', parts: responses });
     }
 
-    return `I completed the available research steps but reached the ${reasoningEffort} reasoning limit. ${toolResults.length} tool operation(s) ran. Please ask me to continue if you want a deeper pass.`;
+    return {
+      answer: `I completed the available research steps but reached the ${reasoningEffort} reasoning limit. ${toolResults.length} tool operation(s) ran. Please ask me to continue if you want a deeper pass.`,
+      streamed: false,
+    };
+  }
+
+  /**
+   * Builds Gemini contents from stored messages, oldest first. Earlier tool
+   * results ride along as text on the user turn they answered, so follow-up
+   * requests ("save those") can refer to them.
+   */
+  private historyContents(messages: any[]) {
+    const contents: any[] = [];
+    for (const message of messages) {
+      let role: string;
+      let text: string;
+      if (message.role === 'tool') {
+        role = 'user';
+        text = this.toolSummary(message);
+      } else if (message.role === 'user' || message.role === 'assistant') {
+        role = message.role === 'assistant' ? 'model' : 'user';
+        text = String(message.content).slice(0, 12000);
+      } else {
+        continue;
+      }
+      const last = contents[contents.length - 1];
+      if (last?.role === role) last.parts.push({ text });
+      else contents.push({ role, parts: [{ text }] });
+    }
+    while (contents[0]?.role === 'model') contents.shift();
+    return contents;
+  }
+
+  private toolSummary(message: any) {
+    const result = message.toolResult || {};
+    const people = Array.isArray(result.people) ? result.people : null;
+    const summary = people
+      ? {
+          ...result,
+          companies: Array.isArray(result.companies)
+            ? result.companies.slice(0, 25).map((company: any) => ({
+                name: company.name,
+                domain: company.domain,
+                status: company.status,
+                score: company.score,
+              }))
+            : undefined,
+          people: people.slice(0, 100).map((person: any) => ({
+            email: person.email,
+            name: `${person.firstName || ''} ${person.lastName || ''}`.trim(),
+            title: person.position || person.jobTitle || '',
+            company: person.company || person.companyName || '',
+          })),
+        }
+      : result;
+    return `Result of ${message.toolName} earlier in this conversation: ${JSON.stringify(summary).slice(0, 6000)}`;
+  }
+
+  private async runTool(
+    userId: string,
+    threadId: string,
+    call: ToolCall,
+    response: Response,
+    signal: AbortSignal | undefined,
+    creditCalls: Record<string, number>,
+  ): Promise<unknown> {
+    const limit = CREDIT_TOOL_LIMITS[call.name];
+    if (limit !== undefined) {
+      creditCalls[call.name] = (creditCalls[call.name] || 0) + 1;
+      if (creditCalls[call.name] > limit) {
+        return {
+          error: `Skipped: ${call.name} already ran ${limit} time(s) in this answer. Ask the user before spending more credits.`,
+        };
+      }
+    }
+    try {
+      return await this.executeTool(userId, threadId, call.name, call.args || {}, response, signal);
+    } catch (error: any) {
+      if (signal?.aborted) throw error;
+      return { error: error?.message || 'This step failed.' };
+    }
   }
 
   private async executeTool(
@@ -433,6 +543,7 @@ export class AiChatService {
     name: string,
     args: Record<string, unknown>,
     response: Response,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     switch (name) {
       case 'get_workspace_data':
@@ -440,17 +551,17 @@ export class AiChatService {
       case 'get_signal_insights':
         return this.signalInsights(userId, args);
       case 'find_hiring_companies':
-        return this.findHiringCompanies(userId, args, response);
+        return this.findHiringCompanies(userId, args, response, signal);
       case 'find_contacts':
         return this.uniqueFinderResults(await this.contactFinder.search(userId, {
           domain: this.optionalString(args.domain),
           company: this.optionalString(args.company),
           jobTitles: this.stringArray(args.jobTitles),
-          hiring: args.hiring === true,
+          hiring: args.hiring === true ? true : undefined,
           limit: this.clampNumber(args.limit, 10, 1, 100),
         }));
       case 'save_contacts':
-        return this.saveContacts(userId, args);
+        return this.saveContacts(userId, threadId, args);
       case 'prepare_email_campaign':
         return this.prepareEmailCampaign(userId, threadId, args);
       case 'prepare_calling_campaign':
@@ -541,7 +652,7 @@ export class AiChatService {
     };
   }
 
-  private async findHiringCompanies(userId: string, args: Record<string, unknown>, response: Response) {
+  private async findHiringCompanies(userId: string, args: Record<string, unknown>, response: Response, signal?: AbortSignal) {
     const description = String(args.description || 'companies currently hiring').trim();
     this.event(response, 'status', { label: 'Building a prospect profile' });
     const profile = await this.prospects.buildProfile(userId, {
@@ -556,7 +667,7 @@ export class AiChatService {
       peoplePerCompany: this.clampNumber(args.peoplePerCompany, 3, 1, 10),
     } as any);
     this.event(response, 'status', { label: 'Searching companies and people' });
-    const outcome = await this.prospects.run(userId, search.id, new AbortController().signal);
+    const outcome = await this.prospects.run(userId, search.id, signal ?? new AbortController().signal);
     const [companies, allPeople] = await Promise.all([
       this.prospects.listCompanies(userId, search.id),
       this.prospects.listPeople(userId, search.id),
@@ -622,51 +733,60 @@ export class AiChatService {
       campaignId: campaign.id,
       campaignName: campaign.name,
       contactCount: contacts.length,
+      templateId,
+      templateCreated: !this.optionalString(args.templateId),
     };
     await this.db.aiChatThread.update({ where: { id: threadId, ownerId: userId }, data: { pendingAction } });
     return { preview: { campaign, template, contacts, recipientResult }, requiresConfirmation: true, pendingAction };
   }
 
-  private async saveContacts(userId: string, args: Record<string, unknown>) {
-    const inputPeople = Array.isArray(args.people)
-      ? args.people.filter((item) => item && typeof item === 'object')
-      : [];
-    if (!inputPeople.length) throw new BadRequestException('Provide at least one discovered contact to save.');
+  private async saveContacts(userId: string, threadId: string, args: Record<string, unknown>) {
+    const requested = [
+      ...new Set(
+        [
+          ...this.stringArray(args.emails),
+          ...(Array.isArray(args.people) ? args.people.map((item: any) => String(item?.email || '')) : []),
+        ]
+          .map((email) => email.trim().toLowerCase())
+          .filter(Boolean),
+      ),
+    ];
+    if (!requested.length) throw new BadRequestException('Provide the email addresses of the contacts to save.');
 
-    const people = this.uniqueNewPeople(
-      inputPeople.map((item: any) => ({
-        email: String(item.email || '').trim().toLowerCase(),
-        firstName: String(item.firstName || '').trim(),
-        lastName: String(item.lastName || '').trim(),
-        position: this.optionalString(item.position),
-        company: this.optionalString(item.company),
-        linkedinUrl: this.optionalString(item.linkedinUrl),
-        phoneNumber: this.optionalString(item.phoneNumber),
-        confidence: typeof item.confidence === 'number' ? item.confidence : undefined,
-        verificationStatus: this.optionalString(item.verificationStatus),
-        sourceUrl: this.optionalString(item.sourceUrl),
-      })),
-    );
-    if (!people.length) throw new BadRequestException('No new contacts were found to save.');
+    // Only people a finder tool actually returned in this conversation can be
+    // saved, using the stored details rather than anything retyped.
+    const found = await this.foundPeople(userId, threadId);
+    const notFound = requested.filter((email) => !found.has(email));
+    const people = requested.filter((email) => found.has(email)).map((email) => found.get(email));
+    if (!people.length) {
+      throw new BadRequestException(
+        'None of those addresses were found by Contact Finder or Prospect Finder in this conversation, so nothing was saved.',
+      );
+    }
 
-    const emails = people.map((item: any) => item.email).filter(Boolean);
-    const existingRows = emails.length
-      ? await this.db.contact.findMany({
-          where: { ownerId: userId, email: { in: emails } },
-          select: { email: true },
-        })
-      : [];
+    const emails = people.map((item: any) => item.email);
+    const existingRows = await this.db.contact.findMany({
+      where: { ownerId: userId, email: { in: emails } },
+      select: { email: true },
+    });
     const existingEmails = new Set(
       existingRows.map((contact: any) => String(contact.email).trim().toLowerCase()),
     );
-    const newPeople = people.filter((item: any) => !existingEmails.has(item.email));
-    const existingContactsSkipped = people.length - newPeople.length;
+    const withoutName = people
+      .filter((item: any) => !existingEmails.has(item.email) && !String(item.firstName || '').trim())
+      .map((item: any) => item.email);
+    const newPeople = people.filter(
+      (item: any) => !existingEmails.has(item.email) && String(item.firstName || '').trim(),
+    );
+    const existingContactsSkipped = people.filter((item: any) => existingEmails.has(item.email)).length;
     if (!newPeople.length) {
       return {
         added: 0,
         updated: 0,
-        skipped: existingContactsSkipped,
+        skipped: existingContactsSkipped + withoutName.length,
         existingContactsSkipped,
+        withoutName,
+        notFound,
         uniqueOnly: true,
         directory: null,
         contacts: [],
@@ -681,15 +801,50 @@ export class AiChatService {
       );
       directoryId = existing?.id;
       if (!directoryId) {
-        const directory = await this.contacts.createDirectory({ name: directoryName, description: 'Created by AI Command Center' }, userId);
+        const directory = await this.contacts.createDirectory({ name: directoryName, description: `Created by ${ASSISTANT_NAME}` }, userId);
         directoryId = directory.id;
       }
     }
-    const result = await this.contactFinder.save(userId, {
-      people: newPeople.slice(0, 200),
-      directoryId,
-      duplicateStrategy: 'SKIP',
-    } as any);
+
+    const totals = { added: 0, updated: 0, skipped: 0, errors: [] as string[] };
+    const hunterPeople = newPeople.filter((item: any) => item.source !== 'prospect');
+    const prospectIds = newPeople
+      .filter((item: any) => item.source === 'prospect' && item.id)
+      .map((item: any) => String(item.id));
+    if (hunterPeople.length) {
+      const result = await this.contactFinder.save(userId, {
+        people: hunterPeople.slice(0, 200).map((item: any) => ({
+          email: item.email,
+          firstName: String(item.firstName).trim(),
+          lastName: this.optionalString(item.lastName),
+          position: this.optionalString(item.position),
+          company: this.optionalString(item.company),
+          linkedinUrl: this.optionalString(item.linkedinUrl),
+          phoneNumber: this.optionalString(item.phoneNumber),
+          confidence: typeof item.confidence === 'number' ? item.confidence : undefined,
+          verificationStatus: this.optionalString(item.verificationStatus),
+          sourceUrl: this.optionalString(item.sourceUrl),
+        })),
+        directoryId,
+        duplicateStrategy: 'SKIP',
+      } as any);
+      totals.added += result.added;
+      totals.updated += result.updated;
+      totals.skipped += Number(result.skipped || 0);
+      totals.errors.push(...(result.errors || []));
+    }
+    if (prospectIds.length) {
+      const result = await this.prospects.addToContacts(userId, {
+        ids: prospectIds.slice(0, 200),
+        directoryId,
+        duplicateStrategy: 'SKIP',
+      } as any);
+      totals.added += result.added;
+      totals.updated += result.updated;
+      totals.skipped += result.duplicates + result.skipped.length;
+      totals.errors.push(...(result.errors || []));
+    }
+
     const saved = await this.db.contact.findMany({
       where: { ownerId: userId, email: { in: newPeople.map((item: any) => item.email) } },
       select: { id: true, firstName: true, lastName: true, email: true, company: true, jobTitle: true, directoryId: true },
@@ -698,13 +853,38 @@ export class AiChatService {
       (contact: any) => !existingEmails.has(String(contact.email).trim().toLowerCase()),
     );
     return {
-      ...result,
-      skipped: Number(result.skipped || 0) + existingContactsSkipped,
+      ...totals,
+      skipped: totals.skipped + existingContactsSkipped + withoutName.length,
       existingContactsSkipped,
+      withoutName,
+      notFound,
       uniqueOnly: true,
       directory: directoryId ? { id: directoryId, name: directoryName } : null,
       contacts: newlySaved,
     };
+  }
+
+  /** People returned by finder tools in this thread, newest result first, keyed by email. */
+  private async foundPeople(userId: string, threadId: string) {
+    const messages = await this.db.aiChatMessage.findMany({
+      where: { ownerId: userId, threadId, toolName: { in: ['find_contacts', 'find_hiring_companies'] } },
+      orderBy: { createdAt: 'desc' },
+      take: 20,
+    });
+    const found = new Map<string, any>();
+    for (const message of messages) {
+      const people = Array.isArray(message.toolResult?.people) ? message.toolResult.people : [];
+      for (const person of people) {
+        const email = String(person?.email || '').trim().toLowerCase();
+        if (!email || found.has(email)) continue;
+        found.set(email, {
+          ...person,
+          email,
+          source: message.toolName === 'find_hiring_companies' ? 'prospect' : 'hunter',
+        });
+      }
+    }
+    return found;
   }
 
   private async prepareCallingCampaign(userId: string, threadId: string, args: Record<string, unknown>) {
@@ -766,16 +946,42 @@ export class AiChatService {
     throw new BadRequestException('This confirmation has expired.');
   }
 
-  private confirmationResult(action: Record<string, unknown>, result: unknown) {
-    if (action.kind === 'review_signal_match') {
-      const outcome = action.action === 'reject' ? 'rejected' : 'approved and launched';
-      return `Signal review ${outcome} for “${String(action.signalTitle || 'Signal')}” at ${String(action.companyName || 'the matched company')} / ${String(action.contactName || 'the matched contact')}.
-
-` + '```json\n' + JSON.stringify(result, null, 2) + '\n```';
+  /** Removes a cancelled draft campaign, and the template made for it, if nothing else launched or uses them. */
+  private async discardDraft(userId: string, action: Record<string, any>) {
+    try {
+      if (action.kind === 'launch_email_campaign' && action.campaignId) {
+        const campaign = await this.db.emailCampaign.findUnique({ where: { id: action.campaignId, ownerId: userId } });
+        if (campaign?.status !== 'DRAFT') return false;
+        await this.emailCampaigns.remove(String(action.campaignId), userId);
+        if (action.templateCreated && action.templateId) {
+          const inUse = await this.db.emailCampaign.count({ where: { ownerId: userId, templateId: action.templateId } });
+          if (!inUse) await this.templates.remove(String(action.templateId), userId);
+        }
+        return true;
+      }
+      if (action.kind === 'launch_calling_campaign' && action.campaignId) {
+        const campaign = await this.db.callingCampaign.findUnique({ where: { id: action.campaignId, ownerId: userId } });
+        if (campaign?.status !== 'DRAFT') return false;
+        await this.callingCampaigns.remove(String(action.campaignId), userId);
+        return true;
+      }
+    } catch {
+      return false;
     }
-    const channel = action.kind === 'launch_email_campaign' ? 'email campaign' : 'calling campaign';
-    return `Launched the ${channel} “${String(action.campaignName || '')}” for ${String(action.contactCount || 0)} contact(s).\n\n` +
-      '```json\n' + JSON.stringify(result, null, 2) + '\n```';
+    return false;
+  }
+
+  private confirmationResult(action: Record<string, unknown>, result: unknown) {
+    const outcome = (result || {}) as Record<string, unknown>;
+    const message = typeof outcome.message === 'string' ? ` ${outcome.message}` : '';
+    if (action.kind === 'review_signal_match') {
+      const verb = action.action === 'reject' ? 'Rejected' : 'Approved and launched';
+      return `${verb} the Signal action for “${String(action.signalTitle || 'Signal')}” at ${String(action.companyName || 'the matched company')} / ${String(action.contactName || 'the matched contact')}.${message}\n\n[Open Signals](/signals)`;
+    }
+    const email = action.kind === 'launch_email_campaign';
+    const status = typeof outcome.status === 'string' ? ` Status: ${outcome.status.toLowerCase()}.` : '';
+    return `Launched the ${email ? 'email' : 'calling'} campaign “${String(action.campaignName || '')}” for ${String(action.contactCount || 0)} contact(s).${message}${status}\n\n` +
+      (email ? '[Open Email Campaigns](/email-campaigns)' : '[Open AI Calling](/calling-campaigns)');
   }
 
   private async fallbackAnswer(userId: string, content: string, response: Response) {
@@ -793,11 +999,11 @@ export class AiChatService {
         '```json\n' + JSON.stringify(data, null, 2).slice(0, 18000) + '\n```';
     }
     this.event(response, 'status', { label: 'Gemini configuration required for this request' });
-    return 'Connect a Gemini API key in Settings to use the AI Command Center for research, enrichment, campaign drafting, and multi-step actions.';
+    return `Connect a Gemini API key in [Settings](/settings) to use ${ASSISTANT_NAME} for research, enrichment, campaign drafting, and multi-step actions.`;
   }
 
   private systemInstruction() {
-    return `You are ReachConvert AI Command Center, an authenticated outreach operations assistant. You can use only the typed tools provided to access the current user's workspace. Never invent data. Use read tools before proposing actions. For email, calling, and Signal review actions, prepare a draft or preview but never execute it until the application receives explicit confirmation. Preserve source URLs, confidence, verification status, and Signal timestamps. Do not reveal private chain-of-thought; give concise progress and final answers. When a tool returns a large result, summarize the important counts and records. The user is in a sales/outreach workspace with Prospect Finder, Contact Finder, Contacts, Email Campaigns, Inbox, AI Calling, Calling Agents, Signals, Scheduler, History, Dashboard, Profile, and Settings.`;
+    return `You are ${ASSISTANT_NAME}, the ReachConvert outreach assistant for an authenticated user. You can use only the typed tools provided to access the current user's workspace. Never invent data. Use read tools before proposing actions. For email, calling, and Signal review actions, prepare a draft or preview but never execute it until the application receives explicit confirmation. Preserve source URLs, confidence, verification status, and Signal timestamps. Do not reveal private chain-of-thought; give concise progress and final answers. When a tool returns a large result, summarize the important counts and records; the app already shows found people, campaign previews, and Signals as cards, so do not repeat every row. find_contacts and find_hiring_companies spend the user's Hunter or Gemini credits: use them only when the user asks to find people or companies, and never repeat a search already made in this conversation. To save contacts, call save_contacts with the email addresses exactly as a finder tool returned them. If a tool returns an error, explain it plainly and suggest the next step. Write answers in concise Markdown, and link to app pages with relative links such as [Contacts](/contacts). The user is in a sales/outreach workspace with Prospect Finder, Contact Finder, Contacts, Email Campaigns, Inbox, AI Calling, Calling Agents, Signals, Scheduler, History, Dashboard, Profile, and Settings.`;
   }
 
   private buildThreadTitle(content: string) {

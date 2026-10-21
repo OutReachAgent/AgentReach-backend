@@ -40,7 +40,7 @@ export class ContactFinderService {
         offset: dto.offset ?? 0,
       };
     }
-    const result = await client.domainSearch({
+    const params = {
       ...target,
       type: dto.type || 'personal',
       seniority: dto.seniority?.length ? dto.seniority : undefined,
@@ -49,6 +49,17 @@ export class ContactFinderService {
       jobTitles: dto.jobTitles?.map((title) => title.trim()).filter(Boolean),
       limit: dto.limit ?? 10,
       offset: dto.offset ?? 0,
+    };
+    // Hunter caps results per request on some plans (10 on Free); retry at
+    // the cap instead of failing the search.
+    const result = await client.domainSearch(params).catch((error) => {
+      const allowed = Number(
+        /limited to (\d+) email/i.exec(String(error?.message))?.[1],
+      );
+      if (!allowed || params.offset > 0 || params.limit <= allowed) {
+        throw error;
+      }
+      return client.domainSearch({ ...params, limit: allowed });
     });
     return {
       ...result,

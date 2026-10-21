@@ -94,6 +94,54 @@ describe('ContactFinderService', () => {
     ]);
   });
 
+  it('retries at the plan limit when Hunter caps results per search', async () => {
+    const { service } = makeService();
+    const domainSearch = jest
+      .spyOn(HunterClient.prototype, 'domainSearch')
+      .mockRejectedValueOnce(
+        new BadRequestException(
+          'Hunter: The search results are limited to 10 email addresses on your current plan.',
+        ),
+      )
+      .mockResolvedValueOnce({
+        domain: 'acme.com',
+        company: 'Acme',
+        pattern: '',
+        people: [person('new@acme.com')],
+        total: 40,
+        limit: 10,
+        offset: 0,
+      });
+
+    const result = await service.search('user-a', {
+      domain: 'acme.com',
+      limit: 100,
+    });
+
+    expect(domainSearch).toHaveBeenCalledTimes(2);
+    expect(domainSearch.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ limit: 100 }),
+    );
+    expect(domainSearch.mock.calls[1][0]).toEqual(
+      expect.objectContaining({ limit: 10 }),
+    );
+    expect(result.people).toHaveLength(1);
+  });
+
+  it('does not retry other Hunter errors', async () => {
+    const { service } = makeService();
+    const domainSearch = jest
+      .spyOn(HunterClient.prototype, 'domainSearch')
+      .mockRejectedValue(
+        new BadRequestException('Your Hunter plan has no searches left this month.'),
+      );
+
+    await expect(
+      service.search('user-a', { domain: 'acme.com', limit: 100 }),
+    ).rejects.toThrow('no searches left');
+    expect(domainSearch).toHaveBeenCalledTimes(1);
+  });
+
   it('checks the company hiring filter before searching its contacts', async () => {
     const { service } = makeService();
     const discover = jest

@@ -82,6 +82,16 @@ export class AiChatController {
     response.setHeader('Connection', 'keep-alive');
     response.setHeader('X-Accel-Buffering', 'no');
     response.flushHeaders?.();
-    await this.chat.streamMessage(request.user.id, id, dto, response);
+    const controller = new AbortController();
+    response.on('close', () => {
+      if (!response.writableFinished) controller.abort();
+    });
+    await this.chat.streamMessage(
+      request.user.id,
+      id,
+      dto,
+      response,
+      controller.signal,
+    );
   }
 }
